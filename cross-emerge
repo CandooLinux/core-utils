@@ -1,0 +1,115 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use Net::SSH::Perl;
+
+sub remote_build {
+	my ($package, $host, $emerge_modes) = @_;
+	my $ssh;
+	my $return_code;
+	my $output;
+	my $err = "";
+	my $run_command = "emerge ".$emerge_modes." ".$package;
+	eval {
+		$ssh = Net::SSH::Perl->new($host);
+		$ssh->login("root");
+		print($ssh);
+		($output, $err, $return_code) = $ssh->cmd("lsb_release -si");
+		chomp $output;
+		if($output ne "Gentoo") {
+			print("Not a Gentoo host");
+			return -1;
+		}
+		($output, $err, $return_code) = $ssh->cmd($run_command);
+	};
+	if(my $eval_error = $@) {
+		$eval_error =~ s/\ at\ \/.*$//;
+		print($eval_error);
+		return -2;
+	}
+	if($return_code == 0) {
+		print('Successfully emerged '.$package." remotely\n");
+	}
+	return $return_code;
+}
+
+sub real_main {
+	my ($package,$emerge_modes,$remote_toolchain,$host) = @_;
+	my $run_command = "";
+	my $init_command = "";
+	my $return_code = 0;
+	my $ssh;
+	my @command_output;
+
+	$init_command = "emerge-wrapper --target ".$remote_toolchain.' --init 2>&1';
+	$run_command = "emerge-wrapper --target ".$remote_toolchain." ".$emerge_modes." ".$package.' 2>&1; echo $?';
+	`$init_command`;
+
+	@command_output = split(/\n/,`$run_command`);
+	$return_code = (@command_output)[-1];
+	if($return_code != 0) {
+		foreach my $val (@command_output) {
+			if($val =~ "^>>> Failed to emerge") {
+				print('Failed to locally emerge '.$package.' for '.$remote_toolchain."\n");
+				print("Trying remotely on host ".$host."\n");
+				if($host ne "") {
+					$return_code = remote_build($package,$host,$emerge_modes);
+				} else {
+					print("Cross failed. Host was not declared. Fallback remote build will not be attempted.\n");
+				}
+				last;
+			}
+		}
+	} else {
+		print('Successfully emerged '.$package.' for '.$remote_toolchain."\n");
+	}
+	return $return_code;
+}
+
+sub rtfm {
+	my ($return_code) = @_;
+	print("Usage: cross_emerge_package -t TOOLCHAIN -h HOST -[emerge modes] package/set\n");
+	print("Emerge modes must be in the short form.\n");
+	print("-t is absolutely necessary and must be a valid toolchain\n");
+	print("-a (--ask) as an emerge mode is illegal\n");
+	print("-h is optional, but some packages will fail without it as they cannot be crosscompiled\n");
+	print("   the host must also be native to the toolchain's target\n");
+	print("Packages are absolutely necessary. They must also appear as expected for an emerge command.\n");
+	print('For example, the following are valid "packages":'."\n");
+	print('nano @world =sys-devel/gcc-4.7.0 games-util/steam-meta::gamerlay ">=media-libs/mesa-13.0.0" sys-kernel/gentoo-sources:4.20.0'."\n");
+	print("THERE IS NO VERBOSE MODE FOR THE INNER WORKINGS OF THIS SCRIPT.\n");
+	return $return_code;
+}
+
+sub main {
+	my $package = "";
+	my $emerge_modes = "";
+	my $toolchain = "";
+	my $host = "";
+	my @array = @_;
+	for(my $number = 0; $number < scalar @array; $number++) {
+		if($array[$number] eq "-t") {
+			$toolchain = $array[++$number];
+			next;
+		}
+		if($array[$number] eq "-h") {
+			$host = $array[++$number];
+			next;
+		}
+		if($array[$number] =~ "^-" && !(($array[$number] =~ "^-t") || ($array[$number] =~ "^-h"))) {
+			$emerge_modes = $array[$number];
+			next;
+		}
+		if($array[$number] =~ "^@" || $array[$number] =~ "^=" || $array[$number] =~ "^>" || $array[$number] =~ "^<" || $array[$number] =~ "^[a-z]") {
+			$package .= $array[$number]." ";
+			next;
+		}
+	}
+	$package =~ s/\ $//;
+	if($package eq "" || $toolchain eq "" || $emerge_modes =~ "a") {
+		return rtfm(-1);
+	}
+	return real_main($package,$emerge_modes,$toolchain,$host);
+}
+
+main(@ARGV);
