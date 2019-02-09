@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# This script will attempt to find dependencies for a binary in terms of Gentoo packages.
+# The condition for it to work is that the dependencies must actually be satisfied.
+function list_dlls {
+	readelf -d ${1} | awk '{if ( $2 == "(NEEDED)" ) print $5}' | sed 's/\]//g;s/\[//g'
+}
+
+function find_dll_provider {
+	equery b ${1} | awk '{print $1}' | grep -v cross\- | sort -u
+	return ${PIPESTATUS[0]}
+}
+
+function where_do_we_get_external_lib_from {
+	ldd ${1} | awk -v lib="${2}" '{if ( $1 == lib ) print $0}' | sed 's/.*=>\ //;s/\ (0x[0-9a-f]*)$//'
+}
+
+function recuresively_walk_object_deps {
+	local target_elf=${1}
+	local elf_dir=$(dirname ${target_elf})
+	local missing_dep=""
+	pushd ${elf_dir} >/dev/null
+		for dep in $(list_dlls ${target_elf}); do
+			find_dll_provider ${dep}
+			if [ $? -ne 0 ]; then
+				missing_dep=$(where_do_we_get_external_lib_from ${target_elf} ${dep})
+				if [ "${missing_dep}" = "" ]; then
+					cat <<EOF > /dev/stderr
+Could not find ${dep}
+EOF
+					exit -1
+				fi
+				recuresively_walk_object_deps ${missing_dep}
+			fi
+		done
+	popd >/dev/null
+}
+
+function scan_deps {
+	local target_elf=${1}
+	local elf_dir=$(dirname ${target_elf})
+	pushd ${elf_dir} >/dev/null
+		for dll in $(list_dlls ${target_elf}); do
+			find_dll_provider ${dll}
+			if [ $? -ne 0 ]; then
+				for i in $(find . -name ${dll}); do
+					for extra_deps in $(list_dlls ${i}); do
+						find_dll_provider ${extra_deps}
+					done
+				done
+			fi
+		done
+	popd >/dev/null
+}
+
+function main {
+	if [ $# -ne 1 ]; then
+		exit 0
+	fi
+	local target_elf=${1}
+	scan_deps ${target_elf} | sort -u
+	exit $?
+}
+
+main $@
